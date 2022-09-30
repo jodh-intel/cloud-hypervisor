@@ -14,11 +14,17 @@ use std::convert::From;
 use std::fmt;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use std::result;
 use std::str::FromStr;
 use thiserror::Error;
 use virtio_devices::{RateLimiterConfig, TokenBucketConfig};
 
+pub use crate::config_api::{
+    BalloonConfig, CmdlineConfig, ConsoleConfig, ConsoleOutputMode, CpuAffinity, CpuFeatures,
+    CpuTopology, CpusConfig, DeviceConfig, DiskConfig, FsConfig, HotplugMethod, MemoryConfig,
+    MemoryZoneConfig, NetConfig, NumaConfig, NumaDistance, PayloadConfig, PlatformConfig,
+    PmemConfig, RngConfig, SgxEpcConfig, UserDeviceConfig, VdpaConfig, VhostMode, VmConfig,
+    VsockConfig, MAX_NUM_PCI_SEGMENTS,
+};
 pub const DEFAULT_VCPUS: u8 = 1;
 pub const DEFAULT_MEMORY_MB: u64 = 512;
 
@@ -34,315 +40,125 @@ pub const DEFAULT_NUM_QUEUES_VUBLK: usize = 1;
 pub const DEFAULT_QUEUE_SIZE_VUBLK: u16 = 128;
 
 pub const DEFAULT_NUM_PCI_SEGMENTS: u16 = 1;
-const MAX_NUM_PCI_SEGMENTS: u16 = 16;
 
-/// Errors associated with VM configuration parameters.
-#[derive(Debug, Error)]
-pub enum Error {
-    /// Filesystem tag is missing
-    ParseFsTagMissing,
-    /// Filesystem socket is missing
-    ParseFsSockMissing,
-    /// Missing persistent memory file parameter.
-    ParsePmemFileMissing,
-    /// Missing vsock socket path parameter.
-    ParseVsockSockMissing,
-    /// Missing vsock cid parameter.
-    ParseVsockCidMissing,
-    /// Missing restore source_url parameter.
-    ParseRestoreSourceUrlMissing,
-    /// Error parsing CPU options
-    ParseCpus(OptionParserError),
-    /// Invalid CPU features
-    InvalidCpuFeatures(String),
-    /// Error parsing memory options
-    ParseMemory(OptionParserError),
-    /// Error parsing memory zone options
-    ParseMemoryZone(OptionParserError),
-    /// Missing 'id' from memory zone
-    ParseMemoryZoneIdMissing,
-    /// Error parsing disk options
-    ParseDisk(OptionParserError),
-    /// Error parsing network options
-    ParseNetwork(OptionParserError),
-    /// Error parsing RNG options
-    ParseRng(OptionParserError),
-    /// Error parsing balloon options
-    ParseBalloon(OptionParserError),
-    /// Error parsing filesystem parameters
-    ParseFileSystem(OptionParserError),
-    /// Error parsing persistent memory parameters
-    ParsePersistentMemory(OptionParserError),
-    /// Failed parsing console
-    ParseConsole(OptionParserError),
-    /// No mode given for console
-    ParseConsoleInvalidModeGiven,
-    /// Failed parsing device parameters
-    ParseDevice(OptionParserError),
-    /// Missing path from device,
-    ParseDevicePathMissing,
-    /// Failed parsing vsock parameters
-    ParseVsock(OptionParserError),
-    /// Failed parsing restore parameters
-    ParseRestore(OptionParserError),
-    /// Failed parsing SGX EPC parameters
-    #[cfg(target_arch = "x86_64")]
-    ParseSgxEpc(OptionParserError),
-    /// Missing 'id' from SGX EPC section
-    #[cfg(target_arch = "x86_64")]
-    ParseSgxEpcIdMissing,
-    /// Failed parsing NUMA parameters
-    ParseNuma(OptionParserError),
-    /// Failed validating configuration
-    Validation(ValidationError),
-    #[cfg(feature = "tdx")]
-    /// Failed parsing TDX config
-    ParseTdx(OptionParserError),
-    #[cfg(feature = "tdx")]
-    /// No TDX firmware
-    FirmwarePathMissing,
-    /// Failed parsing userspace device
-    ParseUserDevice(OptionParserError),
-    /// Missing socket for userspace device
-    ParseUserDeviceSocketMissing,
-    /// Failed parsing platform parameters
-    ParsePlatform(OptionParserError),
-    /// Failed parsing vDPA device
-    ParseVdpa(OptionParserError),
-    /// Missing path for vDPA device
-    ParseVdpaPathMissing,
+pub type Result<T> = std::result::Result<T, Error>;
+
+pub type ValidationResult<T> = std::result::Result<T, ValidationError>;
+
+pub trait Config<T>: FromStr {
+    fn validate(&self, config: &VmConfig) -> ValidationResult<()>;
 }
 
-#[derive(Debug, PartialEq, Eq, Error)]
+pub trait Syntax {
+    fn get_syntax() -> &'static str;
+}
+
+#[derive(PartialEq, Eq, Error, Debug)]
 pub enum ValidationError {
     /// Both console and serial are tty.
+    #[error("Console mode tty specified for both serial and console")]
     DoubleTtyMode,
     /// No kernel specified
+    #[error("No kernel specified")]
     KernelMissing,
     /// Missing file value for console
+    #[error("Path missing when using file console mode")]
     ConsoleFileMissing,
     /// Max is less than boot
+    #[error("Max CPUs lower than boot CPUs")]
     CpusMaxLowerThanBoot,
     /// Both socket and path specified
+    #[error("Disk path and vhost socket both provided")]
     DiskSocketAndPath,
     /// Using vhost user requires shared memory
+    #[error("Using vhost-user requires using shared memory")]
     VhostUserRequiresSharedMemory,
     /// No socket provided for vhost_use
+    #[error("No socket provided when using vhost-user")]
     VhostUserMissingSocket,
     /// Trying to use IOMMU without PCI
+    #[error("Using an IOMMU without PCI support is unsupported")]
     IommuUnsupported,
     /// Trying to use VFIO without PCI
+    #[error("Using VFIO without PCI support is unsupported")]
     VfioUnsupported,
     /// CPU topology count doesn't match max
+    #[error("Product of CPU topology parts does not match maximum vCPUs")]
     CpuTopologyCount,
     /// One part of the CPU topology was zero
+    #[error("No part of the CPU topology can be zero")]
     CpuTopologyZeroPart,
-    #[cfg(target_arch = "aarch64")]
     /// Dies per package must be 1
+    #[cfg(target_arch = "aarch64")]
+    #[error("Dies per package must be 1")]
     CpuTopologyDiesPerPackage,
     /// Virtio needs a min of 2 queues
+    #[error("Number of queues to virtio_net less than 2")]
     VnetQueueLowerThan2,
     /// The input queue number for virtio_net must match the number of input fds
+    #[error("Number of queues to virtio_net does not match the number of input FDs")]
     VnetQueueFdMismatch,
     /// Using reserved fd
+    #[error("Reserved fd number (<= 2)")]
     VnetReservedFd,
     /// Hugepages not turned on
+    #[error("Huge page size specified but huge pages not enabled")]
     HugePageSizeWithoutHugePages,
     /// Huge page size is not power of 2
+    #[error("Huge page size is not power of 2: {0}")]
     InvalidHugePageSize(u64),
     /// CPU Hotplug is not permitted with TDX
     #[cfg(feature = "tdx")]
+    #[error("CPU hotplug is not permitted with TDX")]
     TdxNoCpuHotplug,
     /// Missing firmware for TDX
     #[cfg(feature = "tdx")]
+    #[error("No TDX firmware specified")]
     TdxFirmwareMissing,
     /// Insuffient vCPUs for queues
+    #[error("Number of vCPUs is insufficient for number of queues")]
     TooManyQueues,
     /// Need shared memory for vfio-user
+    #[error("Using user devices requires using shared memory")]
     UserDevicesRequireSharedMemory,
     /// Memory zone is reused across NUMA nodes
+    #[error("Memory zone: {0} belongs to multiple NUMA nodes {1} and {2}")]
     MemoryZoneReused(String, u32, u32),
     /// Invalid number of PCI segments
+    #[error(
+        "Number of PCI segments ({0}) not in range of 1 to {}",
+        MAX_NUM_PCI_SEGMENTS
+    )]
     InvalidNumPciSegments(u16),
     /// Invalid PCI segment id
+    #[error("Invalid PCI segment id: {0}")]
     InvalidPciSegment(u16),
     /// Balloon too big
+    #[error("Ballon size ({0}) greater than RAM ({1})")]
     BalloonLargerThanRam(u64, u64),
     /// On a IOMMU segment but not behind IOMMU
+    #[error("Device is on an IOMMU PCI segment ({0}) but not placed behind IOMMU")]
     OnIommuSegment(u16),
     // On a IOMMU segment but IOMMU not suported
+    #[error(
+        "Device is on an IOMMU PCI segment ({0}) but does not support being placed behind IOMMU"
+    )]
     IommuNotSupportedOnSegment(u16),
     // Identifier is not unique
+    #[error("Identifier {0} is not unique")]
     IdentifierNotUnique(String),
     /// Invalid identifier
+    #[error("Identifier {0} is invalid")]
     InvalidIdentifier(String),
     /// Placing the device behind a virtual IOMMU is not supported
+    #[error("Device does not support being placed behind IOMMU")]
     IommuNotSupported,
     /// Duplicated device path (device added twice)
+    #[error("Duplicated device path: {0}")]
     DuplicateDevicePath(String),
     /// Provided MTU is lower than what the VIRTIO specification expects
+    #[error("Provided MTU {0} is lower than 1280 (expected by VIRTIO specification)")]
     InvalidMtu(u16),
-}
-
-type ValidationResult<T> = std::result::Result<T, ValidationError>;
-
-impl fmt::Display for ValidationError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::ValidationError::*;
-        match self {
-            DoubleTtyMode => write!(f, "Console mode tty specified for both serial and console"),
-            KernelMissing => write!(f, "No kernel specified"),
-            ConsoleFileMissing => write!(f, "Path missing when using file console mode"),
-            CpusMaxLowerThanBoot => write!(f, "Max CPUs lower than boot CPUs"),
-            DiskSocketAndPath => write!(f, "Disk path and vhost socket both provided"),
-            VhostUserRequiresSharedMemory => {
-                write!(f, "Using vhost-user requires using shared memory")
-            }
-            VhostUserMissingSocket => write!(f, "No socket provided when using vhost-user"),
-            IommuUnsupported => write!(f, "Using an IOMMU without PCI support is unsupported"),
-            VfioUnsupported => write!(f, "Using VFIO without PCI support is unsupported"),
-            CpuTopologyZeroPart => write!(f, "No part of the CPU topology can be zero"),
-            CpuTopologyCount => write!(
-                f,
-                "Product of CPU topology parts does not match maximum vCPUs"
-            ),
-            #[cfg(target_arch = "aarch64")]
-            CpuTopologyDiesPerPackage => write!(f, "Dies per package must be 1"),
-            VnetQueueLowerThan2 => write!(f, "Number of queues to virtio_net less than 2"),
-            VnetQueueFdMismatch => write!(
-                f,
-                "Number of queues to virtio_net does not match the number of input FDs"
-            ),
-            VnetReservedFd => write!(f, "Reserved fd number (<= 2)"),
-            HugePageSizeWithoutHugePages => {
-                write!(f, "Huge page size specified but huge pages not enabled")
-            }
-            InvalidHugePageSize(s) => {
-                write!(f, "Huge page size is not power of 2: {}", s)
-            }
-            #[cfg(feature = "tdx")]
-            TdxNoCpuHotplug => {
-                write!(f, "CPU hotplug is not permitted with TDX")
-            }
-            #[cfg(feature = "tdx")]
-            TdxFirmwareMissing => {
-                write!(f, "No TDX firmware specified")
-            }
-            TooManyQueues => {
-                write!(f, "Number of vCPUs is insufficient for number of queues")
-            }
-            UserDevicesRequireSharedMemory => {
-                write!(f, "Using user devices requires using shared memory")
-            }
-            MemoryZoneReused(s, u1, u2) => {
-                write!(
-                    f,
-                    "Memory zone: {} belongs to multiple NUMA nodes {} and {}",
-                    s, u1, u2
-                )
-            }
-            InvalidNumPciSegments(n) => {
-                write!(
-                    f,
-                    "Number of PCI segments ({}) not in range of 1 to {}",
-                    n, MAX_NUM_PCI_SEGMENTS
-                )
-            }
-            InvalidPciSegment(pci_segment) => {
-                write!(f, "Invalid PCI segment id: {}", pci_segment)
-            }
-            BalloonLargerThanRam(balloon_size, ram_size) => {
-                write!(
-                    f,
-                    "Ballon size ({}) greater than RAM ({})",
-                    balloon_size, ram_size
-                )
-            }
-            OnIommuSegment(pci_segment) => {
-                write!(
-                    f,
-                    "Device is on an IOMMU PCI segment ({}) but not placed behind IOMMU",
-                    pci_segment
-                )
-            }
-            IommuNotSupportedOnSegment(pci_segment) => {
-                write!(
-                    f,
-                    "Device is on an IOMMU PCI segment ({}) but does not support being placed behind IOMMU",
-                    pci_segment
-                )
-            }
-            IdentifierNotUnique(s) => {
-                write!(f, "Identifier {} is not unique", s)
-            }
-            InvalidIdentifier(s) => {
-                write!(f, "Identifier {} is invalid", s)
-            }
-            IommuNotSupported => {
-                write!(f, "Device does not support being placed behind IOMMU")
-            }
-            DuplicateDevicePath(p) => write!(f, "Duplicated device path: {}", p),
-            &InvalidMtu(mtu) => {
-                write!(
-                    f,
-                    "Provided MTU {} is lower than 1280 (expected by VIRTIO specification)",
-                    mtu
-                )
-            }
-        }
-    }
-}
-
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        use self::Error::*;
-        match self {
-            ParseConsole(o) => write!(f, "Error parsing --console: {}", o),
-            ParseConsoleInvalidModeGiven => {
-                write!(f, "Error parsing --console: invalid console mode given")
-            }
-            ParseCpus(o) => write!(f, "Error parsing --cpus: {}", o),
-            InvalidCpuFeatures(o) => write!(f, "Invalid feature in --cpus features list: {}", o),
-            ParseDevice(o) => write!(f, "Error parsing --device: {}", o),
-            ParseDevicePathMissing => write!(f, "Error parsing --device: path missing"),
-            ParseFileSystem(o) => write!(f, "Error parsing --fs: {}", o),
-            ParseFsSockMissing => write!(f, "Error parsing --fs: socket missing"),
-            ParseFsTagMissing => write!(f, "Error parsing --fs: tag missing"),
-            ParsePersistentMemory(o) => write!(f, "Error parsing --pmem: {}", o),
-            ParsePmemFileMissing => write!(f, "Error parsing --pmem: file missing"),
-            ParseVsock(o) => write!(f, "Error parsing --vsock: {}", o),
-            ParseVsockCidMissing => write!(f, "Error parsing --vsock: cid missing"),
-            ParseVsockSockMissing => write!(f, "Error parsing --vsock: socket missing"),
-            ParseMemory(o) => write!(f, "Error parsing --memory: {}", o),
-            ParseMemoryZone(o) => write!(f, "Error parsing --memory-zone: {}", o),
-            ParseMemoryZoneIdMissing => write!(f, "Error parsing --memory-zone: id missing"),
-            ParseNetwork(o) => write!(f, "Error parsing --net: {}", o),
-            ParseDisk(o) => write!(f, "Error parsing --disk: {}", o),
-            ParseRng(o) => write!(f, "Error parsing --rng: {}", o),
-            ParseBalloon(o) => write!(f, "Error parsing --balloon: {}", o),
-            ParseRestore(o) => write!(f, "Error parsing --restore: {}", o),
-            #[cfg(target_arch = "x86_64")]
-            ParseSgxEpc(o) => write!(f, "Error parsing --sgx-epc: {}", o),
-            #[cfg(target_arch = "x86_64")]
-            ParseSgxEpcIdMissing => write!(f, "Error parsing --sgx-epc: id missing"),
-            ParseNuma(o) => write!(f, "Error parsing --numa: {}", o),
-            ParseRestoreSourceUrlMissing => {
-                write!(f, "Error parsing --restore: source_url missing")
-            }
-            ParseUserDeviceSocketMissing => {
-                write!(f, "Error parsing --user-device: socket missing")
-            }
-            ParseUserDevice(o) => write!(f, "Error parsing --user-device: {}", o),
-            Validation(v) => write!(f, "Error validating configuration: {}", v),
-            #[cfg(feature = "tdx")]
-            ParseTdx(o) => write!(f, "Error parsing --tdx: {}", o),
-            #[cfg(feature = "tdx")]
-            FirmwarePathMissing => write!(f, "TDX firmware missing"),
-            ParsePlatform(o) => write!(f, "Error parsing --platform: {}", o),
-            ParseVdpa(o) => write!(f, "Error parsing --vdpa: {}", o),
-            ParseVdpaPathMissing => write!(f, "Error parsing --vdpa: path missing"),
-        }
-    }
 }
 
 pub fn add_to_config<T>(items: &mut Option<Vec<T>>, item: T) {
@@ -352,8 +168,6 @@ pub fn add_to_config<T>(items: &mut Option<Vec<T>>, item: T) {
         *items = Some(vec![item]);
     }
 }
-
-pub type Result<T> = result::Result<T, Error>;
 
 pub struct VmParams<'a> {
     pub cpus: &'a str,
@@ -444,12 +258,6 @@ impl<'a> VmParams<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum HotplugMethod {
-    Acpi,
-    VirtioMem,
-}
-
 impl Default for HotplugMethod {
     fn default() -> Self {
         HotplugMethod::Acpi
@@ -473,29 +281,8 @@ impl FromStr for HotplugMethod {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CpuAffinity {
-    pub vcpu: u8,
-    pub host_cpus: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CpuFeatures {
-    #[cfg(target_arch = "x86_64")]
-    #[serde(default)]
-    pub amx: bool,
-}
-
 pub enum CpuTopologyParseError {
     InvalidValue(String),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CpuTopology {
-    pub threads_per_core: u8,
-    pub cores_per_die: u8,
-    pub dies_per_package: u8,
-    pub packages: u8,
 }
 
 impl FromStr for CpuTopology {
@@ -531,24 +318,10 @@ fn default_cpuconfig_max_phys_bits() -> u8 {
     DEFAULT_MAX_PHYS_BITS
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CpusConfig {
-    pub boot_vcpus: u8,
-    pub max_vcpus: u8,
-    #[serde(default)]
-    pub topology: Option<CpuTopology>,
-    #[serde(default)]
-    pub kvm_hyperv: bool,
-    #[serde(default = "default_cpuconfig_max_phys_bits")]
-    pub max_phys_bits: u8,
-    #[serde(default)]
-    pub affinity: Option<Vec<CpuAffinity>>,
-    #[serde(default)]
-    pub features: CpuFeatures,
-}
+impl FromStr for CpusConfig {
+    type Err = Error;
 
-impl CpusConfig {
-    pub fn parse(cpus: &str) -> Result<Self> {
+    fn from_str(s: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("boot")
@@ -558,7 +331,7 @@ impl CpusConfig {
             .add("max_phys_bits")
             .add("affinity")
             .add("features");
-        parser.parse(cpus).map_err(Error::ParseCpus)?;
+        parser.parse(s).map_err(Error::ParseCpus)?;
 
         let boot_vcpus: u8 = parser
             .convert("boot")
@@ -641,23 +414,6 @@ fn default_platformconfig_num_pci_segments() -> u16 {
     DEFAULT_NUM_PCI_SEGMENTS
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct PlatformConfig {
-    #[serde(default = "default_platformconfig_num_pci_segments")]
-    pub num_pci_segments: u16,
-    #[serde(default)]
-    pub iommu_segments: Option<Vec<u16>>,
-    #[serde(default)]
-    pub serial_number: Option<String>,
-    #[serde(default)]
-    pub uuid: Option<String>,
-    #[serde(default)]
-    pub oem_strings: Option<Vec<String>>,
-    #[cfg(feature = "tdx")]
-    #[serde(default)]
-    pub tdx: bool,
-}
-
 impl PlatformConfig {
     pub fn parse(platform: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
@@ -735,51 +491,6 @@ impl Default for PlatformConfig {
             tdx: false,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct MemoryZoneConfig {
-    pub id: String,
-    pub size: u64,
-    #[serde(default)]
-    pub file: Option<PathBuf>,
-    #[serde(default)]
-    pub shared: bool,
-    #[serde(default)]
-    pub hugepages: bool,
-    #[serde(default)]
-    pub hugepage_size: Option<u64>,
-    #[serde(default)]
-    pub host_numa_node: Option<u32>,
-    #[serde(default)]
-    pub hotplug_size: Option<u64>,
-    #[serde(default)]
-    pub hotplugged_size: Option<u64>,
-    #[serde(default)]
-    pub prefault: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct MemoryConfig {
-    pub size: u64,
-    #[serde(default)]
-    pub mergeable: bool,
-    #[serde(default)]
-    pub hotplug_method: HotplugMethod,
-    #[serde(default)]
-    pub hotplug_size: Option<u64>,
-    #[serde(default)]
-    pub hotplugged_size: Option<u64>,
-    #[serde(default)]
-    pub shared: bool,
-    #[serde(default)]
-    pub hugepages: bool,
-    #[serde(default)]
-    pub hugepage_size: Option<u64>,
-    #[serde(default)]
-    pub prefault: bool,
-    #[serde(default)]
-    pub zones: Option<Vec<MemoryZoneConfig>>,
 }
 
 impl MemoryConfig {
@@ -964,21 +675,6 @@ impl Default for MemoryConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct KernelConfig {
-    pub path: PathBuf,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct InitramfsConfig {
-    pub path: PathBuf,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CmdlineConfig {
-    pub args: String,
-}
-
 impl CmdlineConfig {
     pub fn parse(cmdline: Option<&str>) -> Result<Self> {
         let args = cmdline
@@ -987,41 +683,6 @@ impl CmdlineConfig {
 
         Ok(CmdlineConfig { args })
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct DiskConfig {
-    pub path: Option<PathBuf>,
-    #[serde(default)]
-    pub readonly: bool,
-    #[serde(default)]
-    pub direct: bool,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default = "default_diskconfig_num_queues")]
-    pub num_queues: usize,
-    #[serde(default = "default_diskconfig_queue_size")]
-    pub queue_size: u16,
-    #[serde(default)]
-    pub vhost_user: bool,
-    pub vhost_socket: Option<String>,
-    #[serde(default)]
-    pub rate_limiter_config: Option<RateLimiterConfig>,
-    #[serde(default)]
-    pub id: Option<String>,
-    // For testing use only. Not exposed in API.
-    #[serde(default)]
-    pub disable_io_uring: bool,
-    #[serde(default)]
-    pub pci_segment: u16,
-}
-
-fn default_diskconfig_num_queues() -> usize {
-    DEFAULT_NUM_QUEUES_VUBLK
-}
-
-fn default_diskconfig_queue_size() -> u16 {
-    DEFAULT_QUEUE_SIZE_VUBLK
 }
 
 impl Default for DiskConfig {
@@ -1043,16 +704,56 @@ impl Default for DiskConfig {
     }
 }
 
-impl DiskConfig {
-    pub const SYNTAX: &'static str = "Disk parameters \
+impl Syntax for DiskConfig {
+    fn get_syntax() -> &'static str {
+        "Disk parameters \
          \"path=<disk_image_path>,readonly=on|off,direct=on|off,iommu=on|off,\
          num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,\
          vhost_user=on|off,socket=<vhost_user_socket_path>,\
          bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
          ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,\
-         id=<device_id>,pci_segment=<segment_id>\"";
+         id=<device_id>,pci_segment=<segment_id>\""
+    }
+}
 
-    pub fn parse(disk: &str) -> Result<Self> {
+fn default_diskconfig_num_queues() -> usize {
+    DEFAULT_NUM_QUEUES_VUBLK
+}
+
+fn default_diskconfig_queue_size() -> u16 {
+    DEFAULT_QUEUE_SIZE_VUBLK
+}
+
+impl DiskConfig {
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
+        }
+
+        if self.vhost_user && self.iommu {
+            return Err(ValidationError::IommuNotSupported);
+        }
+
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl FromStr for DiskConfig {
+    type Err = Error;
+
+    fn from_str(disk: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("path")
@@ -1180,36 +881,6 @@ impl DiskConfig {
             pci_segment,
         })
     }
-
-    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
-            return Err(ValidationError::TooManyQueues);
-        }
-
-        if self.vhost_user && self.iommu {
-            return Err(ValidationError::IommuNotSupported);
-        }
-
-        if let Some(platform_config) = vm_config.platform.as_ref() {
-            if self.pci_segment >= platform_config.num_pci_segments {
-                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
-            }
-
-            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
-                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
-                }
-            }
-        }
-
-        Ok(())
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum VhostMode {
-    Client,
-    Server,
 }
 
 impl Default for VhostMode {
@@ -1233,41 +904,6 @@ impl FromStr for VhostMode {
             _ => Err(ParseVhostModeError::InvalidValue(s.to_owned())),
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct NetConfig {
-    #[serde(default = "default_netconfig_tap")]
-    pub tap: Option<String>,
-    #[serde(default = "default_netconfig_ip")]
-    pub ip: Ipv4Addr,
-    #[serde(default = "default_netconfig_mask")]
-    pub mask: Ipv4Addr,
-    #[serde(default = "default_netconfig_mac")]
-    pub mac: MacAddr,
-    #[serde(default)]
-    pub host_mac: Option<MacAddr>,
-    #[serde(default)]
-    pub mtu: Option<u16>,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default = "default_netconfig_num_queues")]
-    pub num_queues: usize,
-    #[serde(default = "default_netconfig_queue_size")]
-    pub queue_size: u16,
-    #[serde(default)]
-    pub vhost_user: bool,
-    pub vhost_socket: Option<String>,
-    #[serde(default)]
-    pub vhost_mode: VhostMode,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub fds: Option<Vec<i32>>,
-    #[serde(default)]
-    pub rate_limiter_config: Option<RateLimiterConfig>,
-    #[serde(default)]
-    pub pci_segment: u16,
 }
 
 fn default_netconfig_tap() -> Option<String> {
@@ -1318,14 +954,57 @@ impl Default for NetConfig {
 }
 
 impl NetConfig {
-    pub const SYNTAX: &'static str = "Network parameters \
-    \"tap=<if_name>,ip=<ip_addr>,mask=<net_mask>,mac=<mac_addr>,fd=<fd1,fd2...>,iommu=on|off,\
-    num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,\
-    vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,\
-    bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
-    ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,pci_segment=<segment_id>\"";
+    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if self.num_queues < 2 {
+            return Err(ValidationError::VnetQueueLowerThan2);
+        }
 
-    pub fn parse(net: &str) -> Result<Self> {
+        if self.fds.is_some() && self.fds.as_ref().unwrap().len() * 2 != self.num_queues {
+            return Err(ValidationError::VnetQueueFdMismatch);
+        }
+
+        if let Some(fds) = self.fds.as_ref() {
+            for fd in fds {
+                if *fd <= 2 {
+                    return Err(ValidationError::VnetReservedFd);
+                }
+            }
+        }
+
+        if (self.num_queues / 2) > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
+        }
+
+        if self.vhost_user && self.iommu {
+            return Err(ValidationError::IommuNotSupported);
+        }
+
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
+        }
+
+        if let Some(mtu) = self.mtu {
+            if mtu < virtio_devices::net::MIN_MTU {
+                return Err(ValidationError::InvalidMtu(mtu));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl FromStr for NetConfig {
+    type Err = Error;
+
+    fn from_str(net: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
 
         parser
@@ -1470,59 +1149,17 @@ impl NetConfig {
         };
         Ok(config)
     }
-
-    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if self.num_queues < 2 {
-            return Err(ValidationError::VnetQueueLowerThan2);
-        }
-
-        if self.fds.is_some() && self.fds.as_ref().unwrap().len() * 2 != self.num_queues {
-            return Err(ValidationError::VnetQueueFdMismatch);
-        }
-
-        if let Some(fds) = self.fds.as_ref() {
-            for fd in fds {
-                if *fd <= 2 {
-                    return Err(ValidationError::VnetReservedFd);
-                }
-            }
-        }
-
-        if (self.num_queues / 2) > vm_config.cpus.boot_vcpus as usize {
-            return Err(ValidationError::TooManyQueues);
-        }
-
-        if self.vhost_user && self.iommu {
-            return Err(ValidationError::IommuNotSupported);
-        }
-
-        if let Some(platform_config) = vm_config.platform.as_ref() {
-            if self.pci_segment >= platform_config.num_pci_segments {
-                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
-            }
-
-            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
-                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
-                }
-            }
-        }
-
-        if let Some(mtu) = self.mtu {
-            if mtu < virtio_devices::net::MIN_MTU {
-                return Err(ValidationError::InvalidMtu(mtu));
-            }
-        }
-
-        Ok(())
-    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct RngConfig {
-    pub src: PathBuf,
-    #[serde(default)]
-    pub iommu: bool,
+impl Syntax for NetConfig {
+    fn get_syntax() -> &'static str {
+        "Network parameters \
+    \"tap=<if_name>,ip=<ip_addr>,mask=<net_mask>,mac=<mac_addr>,fd=<fd1,fd2...>,iommu=on|off,\
+    num_queues=<number_of_queues>,queue_size=<size_of_each_queue>,id=<device_id>,\
+    vhost_user=<vhost_user_enable>,socket=<vhost_user_socket_path>,vhost_mode=client|server,\
+    bw_size=<bytes>,bw_one_time_burst=<bytes>,bw_refill_time=<ms>,\
+    ops_size=<io_ops>,ops_one_time_burst=<io_ops>,ops_refill_time=<ms>,pci_segment=<segment_id>\""
+    }
 }
 
 impl RngConfig {
@@ -1555,22 +1192,7 @@ impl Default for RngConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct BalloonConfig {
-    pub size: u64,
-    /// Option to deflate the balloon in case the guest is out of memory.
-    #[serde(default)]
-    pub deflate_on_oom: bool,
-    /// Option to enable free page reporting from the guest.
-    #[serde(default)]
-    pub free_page_reporting: bool,
-}
-
 impl BalloonConfig {
-    pub const SYNTAX: &'static str =
-        "Balloon parameters \"size=<balloon_size>,deflate_on_oom=on|off,\
-        free_page_reporting=on|off\"";
-
     pub fn parse(balloon: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("size");
@@ -1604,18 +1226,11 @@ impl BalloonConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct FsConfig {
-    pub tag: String,
-    pub socket: PathBuf,
-    #[serde(default = "default_fsconfig_num_queues")]
-    pub num_queues: usize,
-    #[serde(default = "default_fsconfig_queue_size")]
-    pub queue_size: u16,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
+impl Syntax for BalloonConfig {
+    fn get_syntax() -> &'static str {
+        "Balloon parameters \"size=<balloon_size>,deflate_on_oom=on|off,\
+        free_page_reporting=on|off\""
+    }
 }
 
 fn default_fsconfig_num_queues() -> usize {
@@ -1639,12 +1254,34 @@ impl Default for FsConfig {
     }
 }
 
-impl FsConfig {
-    pub const SYNTAX: &'static str = "virtio-fs parameters \
-    \"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,\
-    queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>\"";
+impl Config<FsConfig> for FsConfig {
+    fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
+            return Err(ValidationError::TooManyQueues);
+        }
 
-    pub fn parse(fs: &str) -> Result<Self> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) {
+                    return Err(ValidationError::IommuNotSupportedOnSegment(
+                        self.pci_segment,
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+impl FromStr for FsConfig {
+    type Err = Error;
+
+    fn from_str(fs: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("tag")
@@ -1683,22 +1320,26 @@ impl FsConfig {
             pci_segment,
         })
     }
+}
 
+impl Syntax for FsConfig {
+    fn get_syntax() -> &'static str {
+        "virtio-fs parameters \
+    \"tag=<tag_name>,socket=<socket_path>,num_queues=<number_of_queues>,\
+    queue_size=<size_of_each_queue>,id=<device_id>,pci_segment=<segment_id>\""
+    }
+}
+
+impl PmemConfig {
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if self.num_queues > vm_config.cpus.boot_vcpus as usize {
-            return Err(ValidationError::TooManyQueues);
-        }
-
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
                 return Err(ValidationError::InvalidPciSegment(self.pci_segment));
             }
 
             if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) {
-                    return Err(ValidationError::IommuNotSupportedOnSegment(
-                        self.pci_segment,
-                    ));
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
                 }
             }
         }
@@ -1707,26 +1348,10 @@ impl FsConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct PmemConfig {
-    pub file: PathBuf,
-    #[serde(default)]
-    pub size: Option<u64>,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default)]
-    pub discard_writes: bool,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
-}
+impl FromStr for PmemConfig {
+    type Err = Error;
 
-impl PmemConfig {
-    pub const SYNTAX: &'static str = "Persistent memory parameters \
-    \"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,\
-    discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\"";
-    pub fn parse(pmem: &str) -> Result<Self> {
+    fn from_str(pmem: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("size")
@@ -1767,40 +1392,14 @@ impl PmemConfig {
             pci_segment,
         })
     }
+}
 
-    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if let Some(platform_config) = vm_config.platform.as_ref() {
-            if self.pci_segment >= platform_config.num_pci_segments {
-                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
-            }
-
-            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
-                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
-                }
-            }
-        }
-
-        Ok(())
+impl Syntax for PmemConfig {
+    fn get_syntax() -> &'static str {
+        "Persistent memory parameters \
+    \"file=<backing_file_path>,size=<persistent_memory_size>,iommu=on|off,\
+    discard_writes=on|off,id=<device_id>,pci_segment=<segment_id>\""
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub enum ConsoleOutputMode {
-    Off,
-    Pty,
-    Tty,
-    File,
-    Null,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct ConsoleConfig {
-    #[serde(default = "default_consoleconfig_file")]
-    pub file: Option<PathBuf>,
-    pub mode: ConsoleOutputMode,
-    #[serde(default)]
-    pub iommu: bool,
 }
 
 fn default_consoleconfig_file() -> Option<PathBuf> {
@@ -1864,21 +1463,28 @@ impl ConsoleConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct DeviceConfig {
-    pub path: PathBuf,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
+impl Config<DeviceConfig> for DeviceConfig {
+    fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
+        if let Some(platform_config) = vm_config.platform.as_ref() {
+            if self.pci_segment >= platform_config.num_pci_segments {
+                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
+            }
+
+            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
-impl DeviceConfig {
-    pub const SYNTAX: &'static str =
-        "Direct device assignment parameters \"path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
-    pub fn parse(device: &str) -> Result<Self> {
+impl FromStr for DeviceConfig {
+    type Err = Error;
+
+    fn from_str(device: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("path").add("id").add("iommu").add("pci_segment");
         parser.parse(device).map_err(Error::ParseDevice)?;
@@ -1905,7 +1511,15 @@ impl DeviceConfig {
             pci_segment,
         })
     }
+}
 
+impl Syntax for DeviceConfig {
+    fn get_syntax() -> &'static str {
+        "Direct device assignment parameters \"path=<device_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\""
+    }
+}
+
+impl UserDeviceConfig {
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
@@ -1913,8 +1527,10 @@ impl DeviceConfig {
             }
 
             if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
-                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
+                if iommu_segments.contains(&self.pci_segment) {
+                    return Err(ValidationError::IommuNotSupportedOnSegment(
+                        self.pci_segment,
+                    ));
                 }
             }
         }
@@ -1923,19 +1539,10 @@ impl DeviceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct UserDeviceConfig {
-    pub socket: PathBuf,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
-}
+impl FromStr for UserDeviceConfig {
+    type Err = Error;
 
-impl UserDeviceConfig {
-    pub const SYNTAX: &'static str =
-        "Userspace device socket=<socket_path>,id=<device_id>,pci_segment=<segment_id>\"";
-    pub fn parse(user_device: &str) -> Result<Self> {
+    fn from_str(user_device: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("socket").add("id").add("pci_segment");
         parser.parse(user_device).map_err(Error::ParseUserDevice)?;
@@ -1956,7 +1563,19 @@ impl UserDeviceConfig {
             pci_segment,
         })
     }
+}
 
+impl Syntax for UserDeviceConfig {
+    fn get_syntax() -> &'static str {
+        "Userspace device socket=<socket_path>,id=<device_id>,pci_segment=<segment_id>\""
+    }
+}
+
+fn default_vdpaconfig_num_queues() -> usize {
+    1
+}
+
+impl VdpaConfig {
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
@@ -1964,10 +1583,8 @@ impl UserDeviceConfig {
             }
 
             if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) {
-                    return Err(ValidationError::IommuNotSupportedOnSegment(
-                        self.pci_segment,
-                    ));
+                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
+                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
                 }
             }
         }
@@ -1976,28 +1593,10 @@ impl UserDeviceConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct VdpaConfig {
-    pub path: PathBuf,
-    #[serde(default = "default_vdpaconfig_num_queues")]
-    pub num_queues: usize,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
-}
+impl FromStr for VdpaConfig {
+    type Err = Error;
 
-fn default_vdpaconfig_num_queues() -> usize {
-    1
-}
-
-impl VdpaConfig {
-    pub const SYNTAX: &'static str = "vDPA device \
-        \"path=<device_path>,num_queues=<number_of_queues>,iommu=on|off,\
-        id=<device_id>,pci_segment=<segment_id>\"";
-    pub fn parse(vdpa: &str) -> Result<Self> {
+    fn from_str(vdpa: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("path")
@@ -2034,7 +1633,17 @@ impl VdpaConfig {
             pci_segment,
         })
     }
+}
 
+impl Syntax for VdpaConfig {
+    fn get_syntax() -> &'static str {
+        "vDPA device \
+        \"path=<device_path>,num_queues=<number_of_queues>,iommu=on|off,\
+        id=<device_id>,pci_segment=<segment_id>\""
+    }
+}
+
+impl VsockConfig {
     pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
         if let Some(platform_config) = vm_config.platform.as_ref() {
             if self.pci_segment >= platform_config.num_pci_segments {
@@ -2052,22 +1661,10 @@ impl VdpaConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct VsockConfig {
-    pub cid: u64,
-    pub socket: PathBuf,
-    #[serde(default)]
-    pub iommu: bool,
-    #[serde(default)]
-    pub id: Option<String>,
-    #[serde(default)]
-    pub pci_segment: u16,
-}
+impl FromStr for VsockConfig {
+    type Err = Error;
 
-impl VsockConfig {
-    pub const SYNTAX: &'static str = "Virtio VSOCK parameters \
-        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\"";
-    pub fn parse(vsock: &str) -> Result<Self> {
+    fn from_str(vsock: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("socket")
@@ -2104,39 +1701,20 @@ impl VsockConfig {
             pci_segment,
         })
     }
+}
 
-    pub fn validate(&self, vm_config: &VmConfig) -> ValidationResult<()> {
-        if let Some(platform_config) = vm_config.platform.as_ref() {
-            if self.pci_segment >= platform_config.num_pci_segments {
-                return Err(ValidationError::InvalidPciSegment(self.pci_segment));
-            }
-
-            if let Some(iommu_segments) = platform_config.iommu_segments.as_ref() {
-                if iommu_segments.contains(&self.pci_segment) && !self.iommu {
-                    return Err(ValidationError::OnIommuSegment(self.pci_segment));
-                }
-            }
-        }
-
-        Ok(())
+impl Syntax for VsockConfig {
+    fn get_syntax() -> &'static str {
+        "Virtio VSOCK parameters \
+        \"cid=<context_id>,socket=<socket_path>,iommu=on|off,id=<device_id>,pci_segment=<segment_id>\""
     }
 }
 
 #[cfg(target_arch = "x86_64")]
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct SgxEpcConfig {
-    pub id: String,
-    #[serde(default)]
-    pub size: u64,
-    #[serde(default)]
-    pub prefault: bool,
-}
+impl FromStr for SgxEpcConfig {
+    type Err = Error;
 
-#[cfg(target_arch = "x86_64")]
-impl SgxEpcConfig {
-    pub const SYNTAX: &'static str = "SGX EPC parameters \
-        \"id=<epc_section_identifier>,size=<epc_section_size>,prefault=on|off\"";
-    pub fn parse(sgx_epc: &str) -> Result<Self> {
+    fn from_str(sgx_epc: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("id").add("size").add("prefault");
         parser.parse(sgx_epc).map_err(Error::ParseSgxEpc)?;
@@ -2157,34 +1735,18 @@ impl SgxEpcConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct NumaDistance {
-    #[serde(default)]
-    pub destination: u32,
-    #[serde(default)]
-    pub distance: u8,
+#[cfg(target_arch = "x86_64")]
+impl Syntax for SgxEpcConfig {
+    fn get_syntax() -> &'static str {
+        "SGX EPC parameters \
+        \"id=<epc_section_identifier>,size=<epc_section_size>,prefault=on|off\""
+    }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
-pub struct NumaConfig {
-    #[serde(default)]
-    pub guest_numa_id: u32,
-    #[serde(default)]
-    pub cpus: Option<Vec<u8>>,
-    #[serde(default)]
-    pub distances: Option<Vec<NumaDistance>>,
-    #[serde(default)]
-    pub memory_zones: Option<Vec<String>>,
-    #[cfg(target_arch = "x86_64")]
-    #[serde(default)]
-    pub sgx_epc_sections: Option<Vec<String>>,
-}
+impl FromStr for NumaConfig {
+    type Err = Error;
 
-impl NumaConfig {
-    pub const SYNTAX: &'static str = "Settings related to a given NUMA node \
-        \"guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,\
-        memory_zones=<list_of_memory_zones>,sgx_epc_sections=<list_of_sgx_epc_sections>\"";
-    pub fn parse(numa: &str) -> Result<Self> {
+    fn from_str(numa: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser
             .add("guest_numa_id")
@@ -2234,6 +1796,14 @@ impl NumaConfig {
     }
 }
 
+impl Syntax for NumaConfig {
+    fn get_syntax() -> &'static str {
+        "Settings related to a given NUMA node \
+        \"guest_numa_id=<node_id>,cpus=<cpus_id>,distances=<list_of_distances_to_destination_nodes>,\
+        memory_zones=<list_of_memory_zones>,sgx_epc_sections=<list_of_sgx_epc_sections>\""
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, Default)]
 pub struct RestoreConfig {
     pub source_url: PathBuf,
@@ -2241,12 +1811,10 @@ pub struct RestoreConfig {
     pub prefault: bool,
 }
 
-impl RestoreConfig {
-    pub const SYNTAX: &'static str = "Restore from a VM snapshot. \
-        \nRestore parameters \"source_url=<source_url>,prefault=on|off\" \
-        \n`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) \
-        \n`prefault` brings memory pages in when enabled (disabled by default)";
-    pub fn parse(restore: &str) -> Result<Self> {
+impl FromStr for RestoreConfig {
+    type Err = Error;
+
+    fn from_str(restore: &str) -> Result<Self> {
         let mut parser = OptionParser::new();
         parser.add("source_url").add("prefault");
         parser.parse(restore).map_err(Error::ParseRestore)?;
@@ -2268,56 +1836,13 @@ impl RestoreConfig {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct PayloadConfig {
-    #[serde(default)]
-    pub firmware: Option<PathBuf>,
-    #[serde(default)]
-    pub kernel: Option<PathBuf>,
-    #[serde(default)]
-    pub cmdline: Option<String>,
-    #[serde(default)]
-    pub initramfs: Option<PathBuf>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct VmConfig {
-    #[serde(default)]
-    pub cpus: CpusConfig,
-    #[serde(default)]
-    pub memory: MemoryConfig,
-    pub kernel: Option<KernelConfig>,
-    #[serde(default)]
-    pub initramfs: Option<InitramfsConfig>,
-    #[serde(default)]
-    pub cmdline: CmdlineConfig,
-    #[serde(default)]
-    pub payload: Option<PayloadConfig>,
-    pub disks: Option<Vec<DiskConfig>>,
-    pub net: Option<Vec<NetConfig>>,
-    #[serde(default)]
-    pub rng: RngConfig,
-    pub balloon: Option<BalloonConfig>,
-    pub fs: Option<Vec<FsConfig>>,
-    pub pmem: Option<Vec<PmemConfig>>,
-    #[serde(default = "ConsoleConfig::default_serial")]
-    pub serial: ConsoleConfig,
-    #[serde(default = "ConsoleConfig::default_console")]
-    pub console: ConsoleConfig,
-    pub devices: Option<Vec<DeviceConfig>>,
-    pub user_devices: Option<Vec<UserDeviceConfig>>,
-    pub vdpa: Option<Vec<VdpaConfig>>,
-    pub vsock: Option<VsockConfig>,
-    #[serde(default)]
-    pub iommu: bool,
-    #[cfg(target_arch = "x86_64")]
-    pub sgx_epc: Option<Vec<SgxEpcConfig>>,
-    pub numa: Option<Vec<NumaConfig>>,
-    #[serde(default)]
-    pub watchdog: bool,
-    #[cfg(feature = "guest_debug")]
-    pub gdb: bool,
-    pub platform: Option<PlatformConfig>,
+impl Syntax for RestoreConfig {
+    fn get_syntax() -> &'static str {
+        "Restore from a VM snapshot. \
+        \nRestore parameters \"source_url=<source_url>,prefault=on|off\" \
+        \n`source_url` should be a valid URL (e.g file:///foo/bar or tcp://192.168.1.10/foo) \
+        \n`prefault` brings memory pages in when enabled (disabled by default)"
+    }
 }
 
 impl VmConfig {
@@ -2336,6 +1861,164 @@ impl VmConfig {
         }
 
         Ok(())
+    }
+
+    pub fn parse(vm_params: VmParams) -> Result<Self> {
+        let mut disks: Option<Vec<DiskConfig>> = None;
+        if let Some(disk_list) = &vm_params.disks {
+            let mut disk_config_list = Vec::new();
+            for item in disk_list.iter() {
+                let disk_config = DiskConfig::from_str(item)?;
+                disk_config_list.push(disk_config);
+            }
+            disks = Some(disk_config_list);
+        }
+
+        let mut net: Option<Vec<NetConfig>> = None;
+        if let Some(net_list) = &vm_params.net {
+            let mut net_config_list = Vec::new();
+            for item in net_list.iter() {
+                let net_config = NetConfig::from_str(item)?;
+                net_config_list.push(net_config);
+            }
+            net = Some(net_config_list);
+        }
+
+        let rng = RngConfig::parse(vm_params.rng)?;
+
+        let mut balloon: Option<BalloonConfig> = None;
+        if let Some(balloon_params) = &vm_params.balloon {
+            balloon = Some(BalloonConfig::parse(balloon_params)?);
+        }
+
+        let mut fs: Option<Vec<FsConfig>> = None;
+        if let Some(fs_list) = &vm_params.fs {
+            let mut fs_config_list = Vec::new();
+            for item in fs_list.iter() {
+                fs_config_list.push(FsConfig::from_str(item)?);
+            }
+            fs = Some(fs_config_list);
+        }
+
+        let mut pmem: Option<Vec<PmemConfig>> = None;
+        if let Some(pmem_list) = &vm_params.pmem {
+            let mut pmem_config_list = Vec::new();
+            for item in pmem_list.iter() {
+                let pmem_config = PmemConfig::from_str(item)?;
+                pmem_config_list.push(pmem_config);
+            }
+            pmem = Some(pmem_config_list);
+        }
+
+        let console = ConsoleConfig::parse(vm_params.console)?;
+        let serial = ConsoleConfig::parse(vm_params.serial)?;
+
+        let mut devices: Option<Vec<DeviceConfig>> = None;
+        if let Some(device_list) = &vm_params.devices {
+            let mut device_config_list = Vec::new();
+            for item in device_list.iter() {
+                let device_config = DeviceConfig::from_str(item)?;
+                device_config_list.push(device_config);
+            }
+            devices = Some(device_config_list);
+        }
+
+        let mut user_devices: Option<Vec<UserDeviceConfig>> = None;
+        if let Some(user_device_list) = &vm_params.user_devices {
+            let mut user_device_config_list = Vec::new();
+            for item in user_device_list.iter() {
+                let user_device_config = UserDeviceConfig::from_str(item)?;
+                user_device_config_list.push(user_device_config);
+            }
+            user_devices = Some(user_device_config_list);
+        }
+
+        let mut vdpa: Option<Vec<VdpaConfig>> = None;
+        if let Some(vdpa_list) = &vm_params.vdpa {
+            let mut vdpa_config_list = Vec::new();
+            for item in vdpa_list.iter() {
+                let vdpa_config = VdpaConfig::from_str(item)?;
+                vdpa_config_list.push(vdpa_config);
+            }
+            vdpa = Some(vdpa_config_list);
+        }
+
+        let mut vsock: Option<VsockConfig> = None;
+        if let Some(vs) = &vm_params.vsock {
+            let vsock_config = VsockConfig::from_str(vs)?;
+            vsock = Some(vsock_config);
+        }
+
+        let platform = vm_params.platform.map(PlatformConfig::parse).transpose()?;
+
+        #[cfg(target_arch = "x86_64")]
+        let mut sgx_epc: Option<Vec<SgxEpcConfig>> = None;
+        #[cfg(target_arch = "x86_64")]
+        {
+            if let Some(sgx_epc_list) = &vm_params.sgx_epc {
+                let mut sgx_epc_config_list = Vec::new();
+                for item in sgx_epc_list.iter() {
+                    let sgx_epc_config = SgxEpcConfig::from_str(item)?;
+                    sgx_epc_config_list.push(sgx_epc_config);
+                }
+                sgx_epc = Some(sgx_epc_config_list);
+            }
+        }
+
+        let mut numa: Option<Vec<NumaConfig>> = None;
+        if let Some(numa_list) = &vm_params.numa {
+            let mut numa_config_list = Vec::new();
+            for item in numa_list.iter() {
+                let numa_config = NumaConfig::from_str(item)?;
+                numa_config_list.push(numa_config);
+            }
+            numa = Some(numa_config_list);
+        }
+
+        let payload = if vm_params.kernel.is_some() || vm_params.firmware.is_some() {
+            Some(PayloadConfig {
+                kernel: vm_params.kernel.map(PathBuf::from),
+                initramfs: vm_params.initramfs.map(PathBuf::from),
+                cmdline: vm_params.cmdline.map(|s| s.to_string()),
+                firmware: vm_params.firmware.map(PathBuf::from),
+            })
+        } else {
+            None
+        };
+
+        #[cfg(feature = "guest_debug")]
+        let gdb = vm_params.gdb;
+
+        let mut config = VmConfig {
+            cpus: CpusConfig::from_str(vm_params.cpus)?,
+            memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
+            kernel: None,
+            initramfs: None,
+            cmdline: CmdlineConfig::default(),
+            payload,
+            disks,
+            net,
+            rng,
+            balloon,
+            fs,
+            pmem,
+            serial,
+            console,
+            devices,
+            user_devices,
+            vdpa,
+            vsock,
+            iommu: false, // updated in VmConfig::validate()
+            #[cfg(target_arch = "x86_64")]
+            sgx_epc,
+            numa,
+            watchdog: vm_params.watchdog,
+            #[cfg(feature = "guest_debug")]
+            gdb,
+            platform,
+        };
+        config.validate().map_err(Error::Validation)?;
+        Ok(config)
     }
 
     // Also enables virtio-iommu if the config needs it
@@ -2578,164 +2261,6 @@ impl VmConfig {
             .unwrap_or_default();
 
         Ok(id_list)
-    }
-
-    pub fn parse(vm_params: VmParams) -> Result<Self> {
-        let mut disks: Option<Vec<DiskConfig>> = None;
-        if let Some(disk_list) = &vm_params.disks {
-            let mut disk_config_list = Vec::new();
-            for item in disk_list.iter() {
-                let disk_config = DiskConfig::parse(item)?;
-                disk_config_list.push(disk_config);
-            }
-            disks = Some(disk_config_list);
-        }
-
-        let mut net: Option<Vec<NetConfig>> = None;
-        if let Some(net_list) = &vm_params.net {
-            let mut net_config_list = Vec::new();
-            for item in net_list.iter() {
-                let net_config = NetConfig::parse(item)?;
-                net_config_list.push(net_config);
-            }
-            net = Some(net_config_list);
-        }
-
-        let rng = RngConfig::parse(vm_params.rng)?;
-
-        let mut balloon: Option<BalloonConfig> = None;
-        if let Some(balloon_params) = &vm_params.balloon {
-            balloon = Some(BalloonConfig::parse(balloon_params)?);
-        }
-
-        let mut fs: Option<Vec<FsConfig>> = None;
-        if let Some(fs_list) = &vm_params.fs {
-            let mut fs_config_list = Vec::new();
-            for item in fs_list.iter() {
-                fs_config_list.push(FsConfig::parse(item)?);
-            }
-            fs = Some(fs_config_list);
-        }
-
-        let mut pmem: Option<Vec<PmemConfig>> = None;
-        if let Some(pmem_list) = &vm_params.pmem {
-            let mut pmem_config_list = Vec::new();
-            for item in pmem_list.iter() {
-                let pmem_config = PmemConfig::parse(item)?;
-                pmem_config_list.push(pmem_config);
-            }
-            pmem = Some(pmem_config_list);
-        }
-
-        let console = ConsoleConfig::parse(vm_params.console)?;
-        let serial = ConsoleConfig::parse(vm_params.serial)?;
-
-        let mut devices: Option<Vec<DeviceConfig>> = None;
-        if let Some(device_list) = &vm_params.devices {
-            let mut device_config_list = Vec::new();
-            for item in device_list.iter() {
-                let device_config = DeviceConfig::parse(item)?;
-                device_config_list.push(device_config);
-            }
-            devices = Some(device_config_list);
-        }
-
-        let mut user_devices: Option<Vec<UserDeviceConfig>> = None;
-        if let Some(user_device_list) = &vm_params.user_devices {
-            let mut user_device_config_list = Vec::new();
-            for item in user_device_list.iter() {
-                let user_device_config = UserDeviceConfig::parse(item)?;
-                user_device_config_list.push(user_device_config);
-            }
-            user_devices = Some(user_device_config_list);
-        }
-
-        let mut vdpa: Option<Vec<VdpaConfig>> = None;
-        if let Some(vdpa_list) = &vm_params.vdpa {
-            let mut vdpa_config_list = Vec::new();
-            for item in vdpa_list.iter() {
-                let vdpa_config = VdpaConfig::parse(item)?;
-                vdpa_config_list.push(vdpa_config);
-            }
-            vdpa = Some(vdpa_config_list);
-        }
-
-        let mut vsock: Option<VsockConfig> = None;
-        if let Some(vs) = &vm_params.vsock {
-            let vsock_config = VsockConfig::parse(vs)?;
-            vsock = Some(vsock_config);
-        }
-
-        let platform = vm_params.platform.map(PlatformConfig::parse).transpose()?;
-
-        #[cfg(target_arch = "x86_64")]
-        let mut sgx_epc: Option<Vec<SgxEpcConfig>> = None;
-        #[cfg(target_arch = "x86_64")]
-        {
-            if let Some(sgx_epc_list) = &vm_params.sgx_epc {
-                let mut sgx_epc_config_list = Vec::new();
-                for item in sgx_epc_list.iter() {
-                    let sgx_epc_config = SgxEpcConfig::parse(item)?;
-                    sgx_epc_config_list.push(sgx_epc_config);
-                }
-                sgx_epc = Some(sgx_epc_config_list);
-            }
-        }
-
-        let mut numa: Option<Vec<NumaConfig>> = None;
-        if let Some(numa_list) = &vm_params.numa {
-            let mut numa_config_list = Vec::new();
-            for item in numa_list.iter() {
-                let numa_config = NumaConfig::parse(item)?;
-                numa_config_list.push(numa_config);
-            }
-            numa = Some(numa_config_list);
-        }
-
-        let payload = if vm_params.kernel.is_some() || vm_params.firmware.is_some() {
-            Some(PayloadConfig {
-                kernel: vm_params.kernel.map(PathBuf::from),
-                initramfs: vm_params.initramfs.map(PathBuf::from),
-                cmdline: vm_params.cmdline.map(|s| s.to_string()),
-                firmware: vm_params.firmware.map(PathBuf::from),
-            })
-        } else {
-            None
-        };
-
-        #[cfg(feature = "guest_debug")]
-        let gdb = vm_params.gdb;
-
-        let mut config = VmConfig {
-            cpus: CpusConfig::parse(vm_params.cpus)?,
-            memory: MemoryConfig::parse(vm_params.memory, vm_params.memory_zones)?,
-            kernel: None,
-            initramfs: None,
-            cmdline: CmdlineConfig::default(),
-            payload,
-            disks,
-            net,
-            rng,
-            balloon,
-            fs,
-            pmem,
-            serial,
-            console,
-            devices,
-            user_devices,
-            vdpa,
-            vsock,
-            iommu: false, // updated in VmConfig::validate()
-            #[cfg(target_arch = "x86_64")]
-            sgx_epc,
-            numa,
-            watchdog: vm_params.watchdog,
-            #[cfg(feature = "guest_debug")]
-            gdb,
-            platform,
-        };
-        config.validate().map_err(Error::Validation)?;
-        Ok(config)
     }
 
     #[cfg(feature = "tdx")]
@@ -3754,5 +3279,134 @@ mod tests {
             },
         ]);
         assert!(invalid_config.validate().is_err());
+    }
+}
+
+/// Errors associated with VM configuration parameters.
+#[derive(Debug, Error)]
+pub enum Error {
+    /// Filesystem tag is missing
+    ParseFsTagMissing,
+    /// Filesystem socket is missing
+    ParseFsSockMissing,
+    /// Missing persistent memory file parameter.
+    ParsePmemFileMissing,
+    /// Missing vsock socket path parameter.
+    ParseVsockSockMissing,
+    /// Missing vsock cid parameter.
+    ParseVsockCidMissing,
+    /// Missing restore source_url parameter.
+    ParseRestoreSourceUrlMissing,
+    /// Error parsing CPU options
+    ParseCpus(OptionParserError),
+    /// Invalid CPU features
+    InvalidCpuFeatures(String),
+    /// Error parsing memory options
+    ParseMemory(OptionParserError),
+    /// Error parsing memory zone options
+    ParseMemoryZone(OptionParserError),
+    /// Missing 'id' from memory zone
+    ParseMemoryZoneIdMissing,
+    /// Error parsing disk options
+    ParseDisk(OptionParserError),
+    /// Error parsing network options
+    ParseNetwork(OptionParserError),
+    /// Error parsing RNG options
+    ParseRng(OptionParserError),
+    /// Error parsing balloon options
+    ParseBalloon(OptionParserError),
+    /// Error parsing filesystem parameters
+    ParseFileSystem(OptionParserError),
+    /// Error parsing persistent memory parameters
+    ParsePersistentMemory(OptionParserError),
+    /// Failed parsing console
+    ParseConsole(OptionParserError),
+    /// No mode given for console
+    ParseConsoleInvalidModeGiven,
+    /// Failed parsing device parameters
+    ParseDevice(OptionParserError),
+    /// Missing path from device,
+    ParseDevicePathMissing,
+    /// Failed parsing vsock parameters
+    ParseVsock(OptionParserError),
+    /// Failed parsing restore parameters
+    ParseRestore(OptionParserError),
+    /// Failed parsing SGX EPC parameters
+    #[cfg(target_arch = "x86_64")]
+    ParseSgxEpc(OptionParserError),
+    /// Missing 'id' from SGX EPC section
+    #[cfg(target_arch = "x86_64")]
+    ParseSgxEpcIdMissing,
+    /// Failed parsing NUMA parameters
+    ParseNuma(OptionParserError),
+    /// Failed validating configuration
+    Validation(ValidationError),
+    #[cfg(feature = "tdx")]
+    /// Failed parsing TDX config
+    ParseTdx(OptionParserError),
+    #[cfg(feature = "tdx")]
+    /// No TDX firmware
+    FirmwarePathMissing,
+    /// Failed parsing userspace device
+    ParseUserDevice(OptionParserError),
+    /// Missing socket for userspace device
+    ParseUserDeviceSocketMissing,
+    /// Failed parsing platform parameters
+    ParsePlatform(OptionParserError),
+    /// Failed parsing vDPA device
+    ParseVdpa(OptionParserError),
+    /// Missing path for vDPA device
+    ParseVdpaPathMissing,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        use self::Error::*;
+        match self {
+            ParseConsole(o) => write!(f, "Error parsing --console: {}", o),
+            ParseConsoleInvalidModeGiven => {
+                write!(f, "Error parsing --console: invalid console mode given")
+            }
+            ParseCpus(o) => write!(f, "Error parsing --cpus: {}", o),
+            InvalidCpuFeatures(o) => write!(f, "Invalid feature in --cpus features list: {}", o),
+            ParseDevice(o) => write!(f, "Error parsing --device: {}", o),
+            ParseDevicePathMissing => write!(f, "Error parsing --device: path missing"),
+            ParseFileSystem(o) => write!(f, "Error parsing --fs: {}", o),
+            ParseFsSockMissing => write!(f, "Error parsing --fs: socket missing"),
+            ParseFsTagMissing => write!(f, "Error parsing --fs: tag missing"),
+            ParsePersistentMemory(o) => write!(f, "Error parsing --pmem: {}", o),
+            ParsePmemFileMissing => write!(f, "Error parsing --pmem: file missing"),
+            ParseVsock(o) => write!(f, "Error parsing --vsock: {}", o),
+            ParseVsockCidMissing => write!(f, "Error parsing --vsock: cid missing"),
+            ParseVsockSockMissing => write!(f, "Error parsing --vsock: socket missing"),
+            ParseMemory(o) => write!(f, "Error parsing --memory: {}", o),
+            ParseMemoryZone(o) => write!(f, "Error parsing --memory-zone: {}", o),
+            ParseMemoryZoneIdMissing => write!(f, "Error parsing --memory-zone: id missing"),
+            ParseNetwork(o) => write!(f, "Error parsing --net: {}", o),
+            ParseDisk(o) => write!(f, "Error parsing --disk: {}", o),
+            ParseRng(o) => write!(f, "Error parsing --rng: {}", o),
+            ParseBalloon(o) => write!(f, "Error parsing --balloon: {}", o),
+            ParseRestore(o) => write!(f, "Error parsing --restore: {}", o),
+            #[cfg(target_arch = "x86_64")]
+            ParseSgxEpc(o) => write!(f, "Error parsing --sgx-epc: {}", o),
+            #[cfg(target_arch = "x86_64")]
+            ParseSgxEpcIdMissing => write!(f, "Error parsing --sgx-epc: id missing"),
+            ParseNuma(o) => write!(f, "Error parsing --numa: {}", o),
+            ParseRestoreSourceUrlMissing => {
+                write!(f, "Error parsing --restore: source_url missing")
+            }
+            ParseUserDeviceSocketMissing => {
+                write!(f, "Error parsing --user-device: socket missing")
+            }
+            ParseUserDevice(o) => write!(f, "Error parsing --user-device: {}", o),
+            Validation(v) => write!(f, "Error validating configuration: {}", v),
+            #[cfg(feature = "tdx")]
+            ParseTdx(o) => write!(f, "Error parsing --tdx: {}", o),
+            #[cfg(feature = "tdx")]
+            FirmwarePathMissing => write!(f, "TDX firmware missing"),
+            ParsePlatform(o) => write!(f, "Error parsing --platform: {}", o),
+            ParseVdpa(o) => write!(f, "Error parsing --vdpa: {}", o),
+            ParseVdpaPathMissing => write!(f, "Error parsing --vdpa: path missing"),
+        }
     }
 }

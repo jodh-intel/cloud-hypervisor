@@ -2,12 +2,10 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+use crate::config_api::VmConfig;
 #[cfg(feature = "guest_debug")]
 use crate::coredump::GuestDebuggableError;
-use crate::{
-    config::VmConfig,
-    vm::{VmSnapshot, VM_SNAPSHOT_ID},
-};
+use crate::vm::{VmSnapshot, VM_SNAPSHOT_ID};
 use anyhow::anyhow;
 use std::fs::File;
 use std::io::BufReader;

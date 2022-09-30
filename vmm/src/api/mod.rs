@@ -34,10 +34,7 @@ pub use self::http::start_http_path_thread;
 pub mod http;
 pub mod http_endpoint;
 
-use crate::config::{
-    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig, UserDeviceConfig,
-    VdpaConfig, VmConfig, VsockConfig,
-};
+use crate::config::RestoreConfig;
 use crate::device_tree::DeviceTree;
 use crate::vm::{Error as VmError, VmState};
 use micro_http::Body;
@@ -45,6 +42,11 @@ use serde::{Deserialize, Serialize};
 use std::io;
 use std::sync::mpsc::{channel, RecvError, SendError, Sender};
 use std::sync::{Arc, Mutex};
+//use vm_config::{
+use crate::config_api::{
+    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
+    VmConfig, VsockConfig,
+};
 use vm_migration::MigratableError;
 use vmm_sys_util::eventfd::EventFd;
 

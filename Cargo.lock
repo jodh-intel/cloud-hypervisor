@@ -176,6 +176,7 @@ dependencies = [
  "test_infra",
  "thiserror",
  "tracer",
+ "vm-config",
  "vm-memory",
  "vmm",
  "vmm-sys-util",
@@ -1443,6 +1444,18 @@ dependencies = [
  "arch",
  "libc",
  "vm-memory",
+]
+
+[[package]]
+name = "vm-config"
+version = "0.1.0"
+dependencies = [
+ "devices",
+ "net_util",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "virtio-devices",
 ]
 
 [[package]]

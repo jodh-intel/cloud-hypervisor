@@ -11,7 +11,7 @@
 // SPDX-License-Identifier: Apache-2.0 AND BSD-3-Clause
 //
 
-use crate::config::CpusConfig;
+use crate::config_api::CpusConfig;
 #[cfg(feature = "guest_debug")]
 use crate::coredump::{
     CpuElf64Writable, CpuSegment, CpuState as DumpCpusState, DumpState, Elf64Writable,

@@ -14,10 +14,8 @@ use crate::api::{
     ApiError, ApiRequest, ApiResponse, ApiResponsePayload, VmInfo, VmReceiveMigrationData,
     VmSendMigrationData, VmmPingResponse,
 };
-use crate::config::{
-    add_to_config, DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, RestoreConfig,
-    UserDeviceConfig, VdpaConfig, VmConfig, VsockConfig,
-};
+use crate::config::add_to_config;
+use crate::config::RestoreConfig;
 #[cfg(feature = "guest_debug")]
 use crate::coredump::GuestDebuggable;
 #[cfg(all(feature = "kvm", target_arch = "x86_64"))]
@@ -47,6 +45,11 @@ use std::sync::{Arc, Mutex};
 use std::{result, thread};
 use thiserror::Error;
 use tracer::trace_scoped;
+//use vm_config::{
+use config_api::{
+    DeviceConfig, DiskConfig, FsConfig, NetConfig, PmemConfig, UserDeviceConfig, VdpaConfig,
+    VmConfig, VsockConfig,
+};
 use vm_memory::bitmap::AtomicBitmap;
 use vm_migration::{protocol::*, Migratable};
 use vm_migration::{MigratableError, Pausable, Snapshot, Snapshottable, Transportable};
@@ -59,6 +62,7 @@ mod acpi;
 pub mod api;
 mod clone3;
 pub mod config;
+pub mod config_api;
 #[cfg(feature = "guest_debug")]
 mod coredump;
 pub mod cpu;

@@ -17,10 +17,12 @@ use signal_hook::consts::SIGSYS;
 use std::env;
 use std::fs::File;
 use std::os::unix::io::{FromRawFd, RawFd};
+use std::str::FromStr;
 use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use thiserror::Error;
 use vmm::config;
+use vmm::config::Syntax;
 use vmm_sys_util::eventfd::EventFd;
 use vmm_sys_util::signal::block_signal;
 use vmm_sys_util::terminal::Terminal;
@@ -226,7 +228,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("disk")
                 .long("disk")
-                .help(config::DiskConfig::SYNTAX)
+                .help(config::DiskConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -234,7 +236,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("net")
                 .long("net")
-                .help(config::NetConfig::SYNTAX)
+                .help(config::NetConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -251,14 +253,14 @@ fn create_app<'a>(
         .arg(
             Arg::new("balloon")
                 .long("balloon")
-                .help(config::BalloonConfig::SYNTAX)
+                .help(config::BalloonConfig::get_syntax())
                 .takes_value(true)
                 .group("vm-config"),
         )
         .arg(
             Arg::new("fs")
                 .long("fs")
-                .help(config::FsConfig::SYNTAX)
+                .help(config::FsConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -266,7 +268,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("pmem")
                 .long("pmem")
-                .help(config::PmemConfig::SYNTAX)
+                .help(config::PmemConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -290,7 +292,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("device")
                 .long("device")
-                .help(config::DeviceConfig::SYNTAX)
+                .help(config::DeviceConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -298,7 +300,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("user-device")
                 .long("user-device")
-                .help(config::UserDeviceConfig::SYNTAX)
+                .help(config::UserDeviceConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -306,7 +308,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("vdpa")
                 .long("vdpa")
-                .help(config::VdpaConfig::SYNTAX)
+                .help(config::VdpaConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -314,7 +316,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("vsock")
                 .long("vsock")
-                .help(config::VsockConfig::SYNTAX)
+                .help(config::VsockConfig::get_syntax())
                 .takes_value(true)
                 .number_of_values(1)
                 .group("vm-config"),
@@ -322,7 +324,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("numa")
                 .long("numa")
-                .help(config::NumaConfig::SYNTAX)
+                .help(config::NumaConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vm-config"),
@@ -368,7 +370,7 @@ fn create_app<'a>(
         .arg(
             Arg::new("restore")
                 .long("restore")
-                .help(config::RestoreConfig::SYNTAX)
+                .help(config::RestoreConfig::get_syntax())
                 .takes_value(true)
                 .min_values(1)
                 .group("vmm-config"),
@@ -385,7 +387,7 @@ fn create_app<'a>(
     let app = app.arg(
         Arg::new("sgx-epc")
             .long("sgx-epc")
-            .help(config::SgxEpcConfig::SYNTAX)
+            .help(config::SgxEpcConfig::get_syntax())
             .takes_value(true)
             .min_values(1)
             .group("vm-config"),
@@ -570,7 +572,7 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
 
     if payload_present {
         let vm_params = config::VmParams::from_arg_matches(&cmd_arguments);
-        let vm_config = config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
+        let vm_config = vmm::config::VmConfig::parse(vm_params).map_err(Error::ParsingConfig)?;
 
         // Create and boot the VM based off the VM config we just built.
         let sender = api_request_sender.clone();
@@ -585,7 +587,9 @@ fn start_vmm(cmd_arguments: ArgMatches) -> Result<Option<String>, Error> {
         vmm::api::vm_restore(
             api_evt.try_clone().unwrap(),
             api_request_sender,
-            Arc::new(config::RestoreConfig::parse(restore_params).map_err(Error::ParsingRestore)?),
+            Arc::new(
+                config::RestoreConfig::from_str(restore_params).map_err(Error::ParsingRestore)?,
+            ),
         )
         .map_err(Error::VmRestore)?;
     }

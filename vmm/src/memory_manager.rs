@@ -3,8 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 #[cfg(target_arch = "x86_64")]
-use crate::config::SgxEpcConfig;
-use crate::config::{HotplugMethod, MemoryConfig, MemoryZoneConfig};
+use crate::config_api::{HotplugMethod, MemoryConfig, MemoryZoneConfig, SgxEpcConfig};
 #[cfg(feature = "guest_debug")]
 use crate::coredump::{CoredumpMemoryRegion, CoredumpMemoryRegions};
 #[cfg(feature = "guest_debug")]

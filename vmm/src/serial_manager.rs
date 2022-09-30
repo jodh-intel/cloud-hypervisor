@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //
 
-use crate::config::ConsoleOutputMode;
+use crate::config_api::ConsoleOutputMode;
 use crate::device_manager::PtyPair;
 #[cfg(target_arch = "aarch64")]
 use devices::legacy::Pl011;

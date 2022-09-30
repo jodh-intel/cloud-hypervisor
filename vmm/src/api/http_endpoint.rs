@@ -11,14 +11,16 @@ use crate::api::{
     vm_add_vdpa, vm_add_vsock, vm_boot, vm_counters, vm_create, vm_delete, vm_info, vm_pause,
     vm_power_button, vm_reboot, vm_receive_migration, vm_remove_device, vm_resize, vm_resize_zone,
     vm_restore, vm_resume, vm_send_migration, vm_shutdown, vm_snapshot, vmm_ping, vmm_shutdown,
-    ApiRequest, VmAction, VmConfig,
+    ApiRequest, VmAction,
 };
-use crate::config::NetConfig;
 use micro_http::{Body, Method, Request, Response, StatusCode, Version};
 use std::fs::File;
 use std::os::unix::io::IntoRawFd;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
+//use vm_config::NetConfig;
+//use vm_config::VmConfig;
+use crate::config_api::{NetConfig, VmConfig};
 use vmm_sys_util::eventfd::EventFd;
 
 // /api/v1/vm.create handler
